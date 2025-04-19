@@ -28,6 +28,14 @@ class HTTPClient:
         self.mode = "chat"
         self.userId = 1
 
+    def set_mode(self, mode: str):
+        """
+        设置模式
+        """
+        if mode in ["chat", "query"]:
+            self.mode = mode
+        else:
+            raise ValueError("Invalid mode. Choose 'chat' or 'query'.")
     def send_post(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         try:
             # 创建连接
@@ -177,8 +185,10 @@ class HTTPClient:
 
 def main():
     client1 = HTTPClient(host = 'localhost', port = 8804, workspace_slug = 'deepseek7b')
+    #client1.set_mode("query")
     client1.run()
     client2 = HTTPClient(host = 'localhost', port = 8804, workspace_slug = 'test_for_me')
+    #client2.set_mode("query")
     client2.run()
 
 if __name__ == "__main__":

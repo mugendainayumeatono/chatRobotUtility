@@ -5,7 +5,8 @@ from pathlib import Path
 class ChatContent:
     system_content = ""
     user_content = []
-    messages = []
+    def __init__(self):
+        self.messages = []
 
     def format_output(self, content):
         """
@@ -53,7 +54,7 @@ class ChatContent:
         file_path = Path(filename)
         with file_path.open("w", encoding="utf-8") as f:
             for content in self.messages:
-                f.write(str(content) + "\n")
+                f.write(str(content).replace("\\n", "\n") + "\n")
         logging.info(f"聊天内容已保存到 {file_path}")
 
 class test_1(ChatContent):
@@ -85,7 +86,7 @@ class test_2(ChatContent):
         "配置采用HWTACACS协议对Telnet用户进行命令行授权示例",
         "我该如何升级系统文件",
         "我想通过ACL规则限制访问外网",
-        "上面给出的信息适用于什么型号的设备？"
+        "上面给出的信息适用于什么型号的设备？",
         "我刚刚咨询的设备型号是什么"
         "使用5G链接公网时报错了",
         "部署语音网关时遇到问题",
