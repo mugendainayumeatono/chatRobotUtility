@@ -1,22 +1,17 @@
-import json
-import http.client
-import urllib.parse
-import threading
 from typing import Dict, Any
 import os
-from pathlib import Path
 import logging
-import datetime
 import uuid
+from datetime import datetime
 
 import test_suite
+from base_client import HTTPClient
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s %(filename)s:%(lineno)d - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s %(filename)s:%(lineno)d - %(message)s')
 
-class HTTPClient:
+class anythingllm_Client(HTTPClient):
     def __init__(self, host: str = 'localhost', port: int = 8000, workspace_slug: str = 'default', withcontext: bool = True):
-        self.host = host
-        self.port = port
+        super().__init__(host, port)
         self.workspace_slug = workspace_slug
         self.thread_slug = None
         self.withcontext = withcontext
@@ -28,94 +23,22 @@ class HTTPClient:
         self.mode = "chat"
         self.userId = 1
 
-    def set_mode(self, mode: str):
+    def creat_headers(self) -> Dict[str, Any]:
         """
-        设置模式
+        创建请求头
         """
-        if mode in ["chat", "query"]:
-            self.mode = mode
-        else:
-            raise ValueError("Invalid mode. Choose 'chat' or 'query'.")
-    def send_post(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            # 创建连接
-            conn = http.client.HTTPConnection(self.host, self.port)
-            
-            # 准备请求
-            headers = {
-                        'accept': 'application/json',
-                        'Content-Type': 'application/json',
-                        'Authorization': f'Bearer {self.api_key}'
-                    }
-            body = json.dumps(data).encode('utf-8')
-            
-            logging.debug(path)
-            logging.debug(headers)
-            logging.debug(body)
-            # 发送POST请求
-            conn.request('POST', path, body, headers)
-            
-            # 获取响应
-            response = conn.getresponse()
-            response_data = response.read().decode('utf-8')
-            conn.close()
-            logging.debug(response_data)
-            
-            # 解析响应
-            try:
-                return {
-                    "status_code": response.status,
-                    "data": json.loads(response_data)
-                }
-            except json.JSONDecodeError:
-                return {
-                    "status_code": response.status,
-                    "data": {"error": "Invalid response format"}
-                }
-                
-        except Exception as e:
-            return {
-                "status_code": 500,
-                "data": {"error": f"Client error: {str(e)}"}
-            }
-    def response_error_check(self, response: Dict[str, Any]):
-        """
-        检查响应是否有错误
-        """
-        data = response.get("data")
-        if response.get("status_code") != 200:
-            logging.error(f"Error: {data}")
-            return None
-
-        if data is None:
-            logging.error("Error: No data in response")
-            return None
-        else:
-            return data
-
-    def creat_new_thread(self, thrad_name: str = 'default') -> bool:
-        slug = uuid.uuid4()
-        data = {
-                "userId": self.userId,
-                "name": thrad_name,
-                "slug": f"{slug}",
-                }
-        self.create_new_thread = f"/api/v1/workspace/{self.workspace_slug}/thread/new"
-        ret = self.send_post(self.create_new_thread , data)
-        data = self.response_error_check(ret)
-        if data is not None:
-            thread = data.get("thread", None)
-            if thread is not None:
-                logging.info(f"创建会话成功: {thread}")
-                self.thread_slug = thread.get("slug", None)
-                return True
-        logging.error(f"创建会话失败: {data}")
-        return False
-
+        headers = {
+            'accept': 'application/json',
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}'
+        }
+        return headers
+    
     def data_analyze(self, message: str):
         """
         分析响应内容
         """
+        source_title = []
         if message is None:
             logging.error("Error: No message in response")
             return ""
@@ -129,6 +52,9 @@ class HTTPClient:
             chatId = message.get("chatId", None)
             textResponse = message.get("textResponse", "")
             sources = message.get("sources", None)
+            if sources is not None:
+                for source in sources:
+                    source_title.append(source.get("title", None))
             metrics = message.get("metrics", None)
             if metrics is not None:
                 prompt_tokens = metrics.get("prompt_tokens", None)
@@ -136,17 +62,39 @@ class HTTPClient:
                 total_tokens = metrics.get("total_tokens", None)
                 outputTps = metrics.get("outputTps", None)
                 duration = metrics.get("duration", None)
+            textResponse = textResponse + "ref: \n"
+            for each in source_title:
+                textResponse = textResponse + each + "  "
             return textResponse
-
+        
     def talk(self, message: str) -> Dict[str, Any]:
+        """
+        发送消息并获取回复
+        参数：
+            message: 用户输入的字符串
+        返回：
+            模型的回复内容
+        """
+        if self.withcontext:
+            return self.talk_with_context(message)
+        else:
+            return self.talk_without_context(message)
+        
+    def talk_init(self,test_suite):
+        now = datetime.now()
+        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        if self.withcontext:
+            self.creat_new_thread(current_time)
+
+    def talk_without_context(self, message: str) -> Dict[str, Any]:
         data = {
                 "message": f"{message}",
                 "mode": f"{self.mode}",
                 "sessionId": f"{self.sessionId}",
                 "reset": False
                 }
-        self.chat_in_new_thread = f"/api/v1/workspace/{self.workspace_slug}/chat"
-        ret = self.send_post(self.chat_in_new_thread, data)
+        chat_in_new_thread = f"/api/v1/workspace/{self.workspace_slug}/chat"
+        ret = self.send_post(chat_in_new_thread, data)
         data = self.response_error_check(ret)
         message = self.data_analyze(data)
         return message
@@ -158,38 +106,48 @@ class HTTPClient:
                 "userId": self.userId,
                 "reset": False
                 }
-        self.chat_with_context = f"/api/v1/workspace/{self.workspace_slug}/thread/{self.thread_slug}/chat"
-        ret = self.send_post(self.chat_with_context, data)
+        chat_with_context = f"/api/v1/workspace/{self.workspace_slug}/thread/{self.thread_slug}/chat"
+        ret = self.send_post(chat_with_context, data)
         data = self.response_error_check(ret)
         message = self.data_analyze(data)
         return message
-    
-    def run(self):
+
+    def set_mode(self, mode: str):
         """
-        运行交互式聊天循环
+        设置模式
         """
-        logging.info("开始测试")
-        _test_suite = test_suite.test_2()
-        if self.withcontext:
-            self.creat_new_thread()
-        for i in range(len(_test_suite.user_content)):
-            user_input = _test_suite.user_content[i]
-            _test_suite.add_messages({"role":"user", "content": f"{user_input}"})
-            if self.withcontext:
-                message = self.talk_with_context(user_input)
-            else:
-                message = self.talk(user_input)
-            _test_suite.add_messages({"role":"assistant", "content": f"{message}"})
-        _test_suite.save_chat_content()
-        logging.info("测试结束")
+        if mode in ["chat", "query"]:
+            self.mode = mode
+        else:
+            raise ValueError("Invalid mode. Choose 'chat' or 'query'.")
+        
+    def creat_new_thread(self, thrad_name: str = 'default') -> bool:
+        slug = uuid.uuid4()
+        data = {
+                "userId": self.userId,
+                "name": thrad_name,
+                "slug": f"{slug}",
+                }
+        create_new_thread = f"/api/v1/workspace/{self.workspace_slug}/thread/new"
+        ret = self.send_post(create_new_thread , data)
+        data = self.response_error_check(ret)
+        if data is not None:
+            thread = data.get("thread", None)
+            if thread is not None:
+                logging.info(f"创建会话成功: {thread}")
+                self.thread_slug = thread.get("slug", None)
+                return True
+        logging.error(f"创建会话失败: {data}")
+        return False
 
 def main():
-    client1 = HTTPClient(host = 'localhost', port = 8804, workspace_slug = 'deepseek7b')
+    client1 = anythingllm_Client(host = 'localhost', port = 8804, workspace_slug = 'txt_h1')
     #client1.set_mode("query")
-    client1.run()
-    client2 = HTTPClient(host = 'localhost', port = 8804, workspace_slug = 'test_for_me')
+    client1.run(test_suite.test_4_network_device_dev())
+    client2 = anythingllm_Client(host = 'localhost', port = 8804, workspace_slug = 'txt_h5')
     #client2.set_mode("query")
-    client2.run()
+    client2.run(test_suite.test_4_network_device_dev())
+    #client2.run(test_suite.test_99())
 
 if __name__ == "__main__":
     main()
