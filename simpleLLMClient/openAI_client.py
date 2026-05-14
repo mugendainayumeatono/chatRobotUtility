@@ -15,7 +15,7 @@ from base_client import HTTPClient
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s %(filename)s:%(lineno)d - %(message)s')
 
 class openaiClient(HTTPClient):
-    def __init__(self, model="default", temperature=0.7, url="", api_key=None):
+    def __init__(self, model="default", temperature=0.7, url="", api_key=None, stream=False):
         """
         初始化聊天客户端
         参数：
@@ -23,6 +23,7 @@ class openaiClient(HTTPClient):
             temperature: 控制输出的随机性（0-1）
             url: API 基础 URL
             api_key: API 密钥
+            stream: 是否启用流式输出
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -35,6 +36,7 @@ class openaiClient(HTTPClient):
         
         self.model = model
         self.temperature = temperature
+        self.stream = stream
 
     def talk_init(self,test_suite):
         test_suite.add_messages({"role": "system", "content": test_suite.system_content})
@@ -53,11 +55,32 @@ class openaiClient(HTTPClient):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=self._test_suite.messages,
-                temperature=self.temperature
+                temperature=self.temperature,
+                stream=self.stream
             )
-            reply = response.choices[0].message.content.strip()
-            return reply
-        
+            
+            if self.stream:
+                reply = ""
+                try:
+                    for chunk in response:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if hasattr(delta, 'content') and delta.content is not None:
+                                reply += delta.content
+                except Exception as e:
+                    print(f"Error parsing stream: {e}")
+                    if not reply:
+                        return f"解析流响应时出错: {e}"
+                return reply.strip()
+            else:
+                try:
+                    reply = response.choices[0].message.content.strip()
+                except Exception as e:
+                    print(f"Error parsing response: {e}")
+                    print(f"Full response: {response}")
+                    return f"解析响应时出错: {e}"
+                return reply
+
         except openai.OpenAIError as e:
             return f"发生错误: {e}"
 
@@ -65,17 +88,19 @@ class openaiClient(HTTPClient):
 def main():
     parser = argparse.ArgumentParser(description="OpenAI 聊天客户端测试工具")
     parser.add_argument("--model", type=str, default="default", help="模型名称")
-    parser.add_argument("--url", type=str, default="http://127.0.0.1:30000/v1", help="API 基础 URL")
+    parser.add_argument("--url", type=str, default="http://127.0.0.1:30000/v1", help="API基础 URL")
     parser.add_argument("--api_key", type=str, help="API 密钥 (如果未提供，将尝试从环境变量 OPENAI_API_KEY 获取)")
+    parser.add_argument("--stream", action="store_true", help="是否启用流式响应")
     
     args = parser.parse_args()
 
     client = openaiClient(
         model=args.model,
         url=args.url,
-        api_key=args.api_key
+        api_key=args.api_key,
+        stream=args.stream
     )
-    client.run(test_suite.test_2())
+    client.run(test_suite.test_1())
 
 def test():
     # 测试代码
