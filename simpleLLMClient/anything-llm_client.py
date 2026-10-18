@@ -2,6 +2,7 @@ from typing import Dict, Any
 import os
 import logging
 import uuid
+import argparse
 from datetime import datetime
 
 import test_suite
@@ -141,13 +142,47 @@ class anythingllm_Client(HTTPClient):
         return False
 
 def main():
-    client1 = anythingllm_Client(host = 'localhost', port = 8804, workspace_slug = 'txt_h1')
-    #client1.set_mode("query")
-    client1.run(test_suite.test_4_network_device_dev())
-    client2 = anythingllm_Client(host = 'localhost', port = 8804, workspace_slug = 'txt_h5')
-    #client2.set_mode("query")
-    client2.run(test_suite.test_4_network_device_dev())
-    #client2.run(test_suite.test_99())
+    parser = argparse.ArgumentParser(description="AnythingLLM 聊天客户端测试工具")
+    parser.add_argument("--host", type=str, default="localhost", help="服务主机地址 (默认: localhost)")
+    parser.add_argument("--port", type=int, default=8804, help="服务端口 (默认: 8804)")
+    parser.add_argument("--workspace", type=str, default="txt_h1", help="Workspace slug (默认: txt_h1)")
+    parser.add_argument("--mode", type=str, default="chat", choices=["chat", "query"], help="工作模式: chat 或 query")
+    parser.add_argument("--no_context", action="store_true", help="是否禁用上下文记忆")
+    parser.add_argument("--test-suite", "--test_suite", "--test", "-t", type=str, default="test_4_network_device_dev",
+                        help=f"要执行的测试套件名称 (默认: test_4_network_device_dev，可选: {', '.join(test_suite.get_available_test_suites())})")
+    parser.add_argument("--list-test", "--list-tests", "--list_tests", "--list_test", dest="list_test", action="store_true", help="列出所有可用的测试套件并退出")
+    parser.add_argument("--list-modes", "--list-mode", "--list_modes", "--list_mode", dest="list_modes", action="store_true", help="列出全部可用的工作模式并退出")
+
+    args = parser.parse_args()
+
+    if args.list_test:
+        print("可用的测试套件:")
+        for name in test_suite.get_available_test_suites():
+            print(f"  - {name}")
+        return
+
+    if args.list_modes:
+        print("AnythingLLM 可用的工作模式 (Mode):")
+        print("  - chat : 普通多轮对话交互")
+        print("  - query: 知识库检索增强问答 (RAG)")
+        return
+
+    client = anythingllm_Client(
+        host=args.host,
+        port=args.port,
+        workspace_slug=args.workspace,
+        withcontext=not args.no_context
+    )
+    if args.mode:
+        client.set_mode(args.mode)
+
+    try:
+        suite = test_suite.get_test_suite(args.test_suite)
+    except ValueError as e:
+        logging.error(e)
+        return
+
+    client.run(suite)
 
 if __name__ == "__main__":
     main()

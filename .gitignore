@@ -175,3 +175,10 @@ cython_debug/
 
 # VS Code
 .vscode/
+
+# Logs
+logs/
+
+# Local run scripts
+run.sh
+

@@ -1,5 +1,7 @@
 import logging
 import datetime
+import sys
+import inspect
 from pathlib import Path
 
 class ChatContent:
@@ -43,7 +45,7 @@ class ChatContent:
         self.messages.append(input)
         self.format_output(input)
 
-    def save_chat_content(self):
+    def save_chat_content(self, log_dir=None):
         """
         保存聊天内容到文件
         """
@@ -51,11 +53,17 @@ class ChatContent:
         current_time = datetime.datetime.now()
         # 格式化为字符串（例如：20250406_143022）
         filename = current_time.strftime("chat_log_%Y%m%d_%H%M%S") + ".log"
-        file_path = Path(filename)
+        if log_dir is None:
+            dir_path = Path(__file__).resolve().parent / "logs"
+        else:
+            dir_path = Path(log_dir)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        file_path = dir_path / filename
         with file_path.open("w", encoding="utf-8") as f:
             for content in self.messages:
                 f.write(str(content).replace("\\n", "\n") + "\n")
         logging.info(f"聊天内容已保存到 {file_path}")
+        return file_path
 
 class test_1(ChatContent):
     system_content = "你是一个helpful assistant."
@@ -129,6 +137,11 @@ class test_4_network_device_dev(ChatContent):
         "在主微端口失效后提升一个次微端口,应该怎么做？",
     ]
 
+class test_5_ping(ChatContent):
+    user_content = [
+        "你是谁，什么版本",
+    ]
+
 class test_99(ChatContent):
     user_content = [
         "配置GRE隧道，并在隧道上运行静态路由实现互通的示例",
@@ -140,3 +153,35 @@ class test_99(ChatContent):
         "使用5G链接公网时报错了",
         "部署语音网关时遇到问题",
     ]
+
+
+def get_available_test_suites():
+    """
+    获取所有已定义的测试套件名称列表
+    """
+    current_module = sys.modules[__name__]
+    suites = []
+    for name, cls in inspect.getmembers(current_module, inspect.isclass):
+        if issubclass(cls, ChatContent) and cls is not ChatContent:
+            suites.append(name)
+    return sorted(suites)
+
+
+def get_test_suite(name: str, *args, **kwargs) -> ChatContent:
+    """
+    根据测试套件名称获取其实例
+    参数：
+        name: 测试套件类名（例如 'test_1', 'test_5_ping'）
+    返回：
+        ChatContent 测试套件实例
+    异常：
+        ValueError: 当未找到对应测试套件时抛出
+    """
+    current_module = sys.modules[__name__]
+    cls = getattr(current_module, name, None)
+    if cls is not None and inspect.isclass(cls) and issubclass(cls, ChatContent) and cls is not ChatContent:
+        return cls(*args, **kwargs)
+
+    available = get_available_test_suites()
+    raise ValueError(f"未找到测试套件 '{name}'。可用测试套件列表: {', '.join(available)}")
+

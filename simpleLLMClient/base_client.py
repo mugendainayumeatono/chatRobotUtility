@@ -91,16 +91,24 @@ class HTTPClient:
     def talk_init(self,test_suite):
         pass
     
-    def run(self,_test_suite):
+    def run(self, _test_suite):
         """
         运行交互式聊天循环
+        参数：
+            _test_suite: 测试套件实例、测试套件类、或测试套件名称字符串
         """
-        logging.info("开始测试")
+        if isinstance(_test_suite, str):
+            import test_suite
+            _test_suite = test_suite.get_test_suite(_test_suite)
+        elif isinstance(_test_suite, type):
+            _test_suite = _test_suite()
+
+        logging.info(f"开始测试: {_test_suite.__class__.__name__}")
         self.talk_init(_test_suite)
         for i in range(len(_test_suite.user_content)):
             user_input = _test_suite.user_content[i]
-            _test_suite.add_messages({"role":"user", "content": f"{user_input}"})
+            _test_suite.add_messages({"role": "user", "content": f"{user_input}"})
             message = self.talk(user_input)
-            _test_suite.add_messages({"role":"assistant", "content": f"{message}"})
+            _test_suite.add_messages({"role": "assistant", "content": f"{message}"})
         _test_suite.save_chat_content()
-        logging.info("测试结束")
+        logging.info(f"测试结束: {_test_suite.__class__.__name__}")
