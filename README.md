@@ -31,9 +31,12 @@
   - **AnythingLLM**：支持 Workspace 与 Thread 会话管理，自动解析 RAG 知识库检索来源（Reference Sources）。
   - **RAGFlow**：支持基于 RAGFlow 服务的知识库问答对接。
 - **流式与非流式**：OpenAI 客户端支持 `--stream` 流式输出与完整响应解析。
-- **自动化测试套件**：内置多个预设测试集（通用问答、产品咨询、网络设备排障、连通性探测等）。
+- **多模态支持（文生图保存与图文输入）**：
+  - 当要求模型画一幅画时，支持自动解析模型返回的图片数据（包括 `images` 扩展字段、多模态 `content` 数组、Markdown/Data URI 内嵌图片以及远程图片链接），自动识别图片格式（`.jpg`、`.png`、`.webp`、`.gif`、`.bmp`）并保存至本地 `logs/` 文件夹中。
+  - 支持通过 `--image` (`-i`) 传入本地图片或远程图片 URL 进行多模态图文问答。
+- **自动化测试套件**：内置多个预设测试集（通用问答、产品咨询、网络设备排障、连通性探测、多模态画图等）。
 - **思维链过滤**：自动识别并截断 `</think>` 标签前的深度思考内容，输出干净的最终回答。
-- **日志持久化**：测试运行过程与交互内容自动保存至 `logs/` 文件夹下，并带有时间戳命名。
+- **日志与图片持久化**：测试运行过程、交互日志及模型生成的图片均自动保存至 `logs/` 文件夹下，并带有时间戳命名。
 
 ---
 
@@ -42,14 +45,14 @@
 ```text
 chatRobotUtility/
 ├── base_client.py         # HTTP 基础客户端类与测试调度器 (HTTPClient)
-├── openAI_client.py       # OpenAI 兼容 API 客户端 (支持流式/非流式)
+├── openAI_client.py       # OpenAI 兼容 API 客户端 (支持流式/非流式及多模态收发)
 ├── anything-llm_client.py # AnythingLLM 专用客户端 (支持 RAG 知识库与会话上下文)
 ├── ragflow_client.py      # RAGFlow 专用客户端
 ├── deepDeekOverOpenAI.py  # 简易 OpenAI 基础调用示例
-├── test_suite.py          # 预设测试用例库与聊天内容持久化管理器 (ChatContent)
+├── test_suite.py          # 预设测试用例库与聊天内容/图片持久化管理器 (ChatContent)
 ├── run.sh                 # 本地快捷启动命令脚本 (已被 .gitignore 忽略)
 ├── requirements.txt       # Python 项目依赖
-├── logs/                  # 交互日志输出目录 (已被 .gitignore 忽略)
+├── logs/                  # 交互日志与生成图片输出目录 (已被 .gitignore 忽略)
 └── README.md              # 项目使用说明文档
 ```
 
@@ -89,7 +92,9 @@ python openAI_client.py [参数]
 | `--url` | | `str` | `http://127.0.0.1:30000/v1` | OpenAI 兼容接口 Base URL |
 | `--api_key` | | `str` | 环境变量 `OPENAI_API_KEY` 或 `EMPTY` | API 认证密钥 |
 | `--stream` | | 标志 | `False` | 启用流式（Stream）输出模式 |
-| `--test-suite` | `--test`, `-t` | `str` | `test_5_ping` | 指定执行的测试套件名称（如 `test_1`、`test_2` 等） |
+| `--test-suite` | `--test`, `-t` | `str` | `test_5_ping` | 指定执行的测试套件名称（如 `test_1`、`test_6_draw` 等） |
+| `--prompt` | `-p` | `str` | `None` | 直接发送单条提示词（例如要求模型画一幅画），不指定则运行测试套件 |
+| `--image` | `-i` | `list[str]` | `None` | 附加的多模态输入图片本地路径或 URL（可指定多个） |
 | `--list-test` | `--list-tests` | 标志 | `False` | 列出所有可用的测试套件并退出 |
 | `--list-modes` | `--list-mode`, `--list-models` | 标志 | `False` | 列出服务端全部可用的模型列表并退出 |
 
@@ -116,7 +121,7 @@ python openAI_client.py [参数]
 
 ### 4. 测试套件与日志保存 (`test_suite.py`)
 
-提供 `ChatContent` 基类、预设测试用例及动态加载函数：
+提供 `ChatContent` 基类、预设测试用例、图片提取与保存工具函数及动态加载函数：
 
 - **动态加载函数**：
   - `test_suite.get_available_test_suites()`: 返回当前所有已定义的测试套件名称列表。
@@ -127,11 +132,12 @@ python openAI_client.py [参数]
   - `test_3`: 带指令与退出的交互测试
   - `test_4_network_device_dev`: 驱动开发与网络设备专项技术问答测试
   - `test_5_ping`: 身份与可用性探测问答测试
+  - `test_6_draw`: 多模态文生图画图测试
   - `test_99`: 路由配置与网络故障排障问答测试
 
-#### 日志保存机制
-当测试运行完成（即调用 `save_chat_content()`）后，对话历史会自动保存至 `logs/` 文件夹下：
-- 文件路径示例：`logs/chat_log_20261018_221000.log`
+#### 日志与图片保存机制
+- **对话日志**：当测试运行完成（调用 `save_chat_content()`）后，对话历史自动保存至 `logs/chat_log_YYYYMMDD_HHMMSS.log`。
+- **生成图片保存**：当要求模型画一幅画时，客户端会自动提取模型返回的图片并保存至 `logs/image_YYYYMMDD_HHMMSS.<ext>`（若同一秒内有多张图片则自动追加序号 `_1`、`_2`），同时在对话日志中记录图片保存的完整路径。
 - 若 `logs/` 文件夹不存在，程序将自动创建。
 
 ---
@@ -165,6 +171,24 @@ python openAI_client.py \
   --model "gemini-3.8-flash" \
   --stream \
   -t test_4_network_device_dev
+```
+
+#### 1.4 多模态画图并自动保存至 `logs/` 文件夹
+```bash
+# 方式 1：运行预设画图测试套件 test_6_draw
+python openAI_client.py \
+  --url "http://127.0.0.1:8317/v1" \
+  --model "gemini-3.1-flash-image" \
+  --api_key "sk-xxxxxx" \
+  --test test_6_draw \
+  --stream
+
+# 方式 2：使用 --prompt (-p) 直接要求模型画一幅画
+python openAI_client.py \
+  --url "http://127.0.0.1:8317/v1" \
+  --model "gemini-3.1-flash-image" \
+  --api_key "sk-xxxxxx" \
+  -p "请画一幅水墨风格的江南水乡春景图"
 ```
 
 ---
