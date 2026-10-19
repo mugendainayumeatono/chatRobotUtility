@@ -84,6 +84,7 @@ def save_image_bytes(
     mime_type: Optional[str] = None,
     log_dir: Optional[Any] = None,
     prefix: str = "image",
+    filename: Optional[str] = None,
 ) -> Optional[Path]:
     """
     将图片字节流保存到 logs 文件夹中
@@ -92,6 +93,7 @@ def save_image_bytes(
         mime_type: 可选的 MIME 类型
         log_dir: 保存目录（默认为项目根目录下的 logs 文件夹）
         prefix: 文件名前缀（默认 'image'）
+        filename: 可选的固定保存文件名（例如 'test6_output.png'）
     返回：
         保存成功后的本地文件路径 Path，失败则返回 None
     """
@@ -109,16 +111,23 @@ def save_image_bytes(
         return None
 
     dir_path = get_log_dir(log_dir).resolve()
-    safe_prefix = re.sub(r"[^a-zA-Z0-9_-]", "", os.path.basename(prefix)) or "image"
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if filename:
+        safe_name = os.path.basename(filename)
+        if not safe_name:
+            logging.error("保存图片失败: 非法的文件名")
+            return None
+        file_path = (dir_path / safe_name).resolve()
+    else:
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_-]", "", os.path.basename(prefix)) or "image"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    candidate_name = f"{safe_prefix}_{timestamp}{ext}"
-    file_path = (dir_path / candidate_name).resolve()
-    counter = 1
-    while file_path.exists():
-        candidate_name = f"{safe_prefix}_{timestamp}_{counter}{ext}"
+        candidate_name = f"{safe_prefix}_{timestamp}{ext}"
         file_path = (dir_path / candidate_name).resolve()
-        counter += 1
+        counter = 1
+        while file_path.exists():
+            candidate_name = f"{safe_prefix}_{timestamp}_{counter}{ext}"
+            file_path = (dir_path / candidate_name).resolve()
+            counter += 1
 
     # 路径边界安全校验，防止目录穿越
     if not str(file_path).startswith(str(dir_path) + os.sep):
@@ -268,6 +277,7 @@ def save_image_from_source(
     mime_type: Optional[str] = None,
     log_dir: Optional[Any] = None,
     prefix: str = "image",
+    filename: Optional[str] = None,
 ) -> Optional[Path]:
     """
     从图片数据源中提取图片并保存至 logs 目录
@@ -276,13 +286,20 @@ def save_image_from_source(
     if not extracted:
         return None
     image_bytes, detected_mime = extracted
-    return save_image_bytes(image_bytes, detected_mime or mime_type, log_dir=log_dir, prefix=prefix)
+    return save_image_bytes(
+        image_bytes,
+        detected_mime or mime_type,
+        log_dir=log_dir,
+        prefix=prefix,
+        filename=filename,
+    )
 
 
 def extract_and_save_images_from_text(
     text: str,
     log_dir: Optional[Any] = None,
     seen_hashes: Optional[set] = None,
+    filename: Optional[str] = None,
 ) -> Tuple[str, List[Path]]:
     """
     从文本回复中提取内嵌的图片（如 Markdown data:image/... 或 https:// 图片链接、裸 data:image/...），
@@ -301,7 +318,7 @@ def extract_and_save_images_from_text(
         digest = hashlib.sha256(img_bytes).hexdigest()
         if digest in seen_hashes:
             return None
-        path = save_image_bytes(img_bytes, mime, log_dir=log_dir)
+        path = save_image_bytes(img_bytes, mime, log_dir=log_dir, filename=filename)
         if path is not None:
             seen_hashes.add(digest)
             saved_paths.append(path)
@@ -360,14 +377,80 @@ def extract_and_save_images_from_text(
     return cleaned_text, saved_paths
 
 
+def resolve_and_validate_attachments(attachment_lists: Optional[List[str]]) -> List[str]:
+    """
+    检查 attachment_lists 中每个路径指向的本地文件是否存在。
+    若不存在，在日志中记录警告（warning），仅返回存在的有效文件路径列表。
+    """
+    if not attachment_lists:
+        return []
+
+    if not isinstance(attachment_lists, list):
+        logging.warning(f"attachment_lists 应为列表类型，实际为 {type(attachment_lists).__name__}，已忽略")
+        return []
+
+    valid_paths: List[str] = []
+    base_dir = Path(__file__).resolve().parent
+    for raw_path in attachment_lists:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            logging.warning(f"附件路径无效或为空，已忽略: {raw_path}")
+            continue
+
+        path = Path(raw_path).expanduser()
+        if path.is_file():
+            valid_paths.append(str(path.resolve()))
+            continue
+
+        if not path.is_absolute():
+            alt_path = (base_dir / path).resolve()
+            if alt_path.is_file():
+                valid_paths.append(str(alt_path))
+                continue
+
+        logging.warning(f"附件文件不存在，已忽略: {raw_path}")
+
+    return valid_paths
+
+
 class ChatContent:
     system_content = ""
     user_content = []
+    image_filename: Optional[str] = None
 
     def __init__(self, log_dir=None):
         self.messages = []
         self.saved_images: List[Path] = []
         self.log_dir = log_dir
+        if self.image_filename:
+            target_file = get_log_dir(self.log_dir) / os.path.basename(self.image_filename)
+            if target_file.is_file():
+                try:
+                    target_file.unlink()
+                except OSError:
+                    pass
+
+    def validate_user_input(self, item: dict) -> dict:
+        """
+        校验单轮用户输入字典（包含 message 和 attachment_lists），
+        判断 attachment_lists 中路径指向的文件是否存在，不存在则记 warning 日志。
+        """
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"user_content 元素必须为字典格式 {{'message': str, 'attachment_lists': list}}，实际为: {type(item).__name__}"
+            )
+        message = item.get("message", "")
+        raw_attachments = item.get("attachment_lists", [])
+        valid_attachments = resolve_and_validate_attachments(raw_attachments)
+        return {
+            "message": message,
+            "attachment_lists": valid_attachments,
+        }
+
+    def get_validated_user_input(self, index: int) -> dict:
+        """
+        按轮次索引获取并校验用户输入字典
+        """
+        return self.validate_user_input(self.user_content[index])
 
     def format_output(self, content):
         """
@@ -376,7 +459,11 @@ class ChatContent:
         if isinstance(content, dict):
             role = content.get("role", "unknown")
             message = content.get("content", "")
-            logging.info(f"{role}: {message}")
+            attachments = content.get("attachment_lists", [])
+            if attachments:
+                logging.info(f"{role}: {message} [attachments: {attachments}]")
+            else:
+                logging.info(f"{role}: {message}")
         else:
             logging.info(content)
 
@@ -397,7 +484,12 @@ class ChatContent:
         保存模型返回的图片到 logs 文件夹，并记录到当前会话的 saved_images 列表中
         """
         target_dir = log_dir if log_dir is not None else self.log_dir
-        path = save_image_from_source(source, mime_type=mime_type, log_dir=target_dir)
+        path = save_image_from_source(
+            source,
+            mime_type=mime_type,
+            log_dir=target_dir,
+            filename=self.image_filename,
+        )
         if path is not None:
             self.saved_images.append(path)
         return path
@@ -406,7 +498,7 @@ class ChatContent:
         """
         记录聊天内容
         参数：
-            input: 消息字典（包含 role 和 content）
+            input: 消息字典（包含 role 和 content，可选 attachment_lists）
         """
         if isinstance(input, dict):
             content = input.get("content", "")
@@ -415,7 +507,11 @@ class ChatContent:
 
             # 若 assistant 回复中包含内联图片数据，自动提取并保存到 logs 文件夹
             if input.get("role") == "assistant" and isinstance(content, str) and "data:image/" in content:
-                content, paths = extract_and_save_images_from_text(content, log_dir=self.log_dir)
+                content, paths = extract_and_save_images_from_text(
+                    content,
+                    log_dir=self.log_dir,
+                    filename=self.image_filename,
+                )
                 self.saved_images.extend(paths)
 
             input["content"] = content
@@ -444,101 +540,109 @@ class ChatContent:
 class test_1(ChatContent):
     system_content = "你是一个helpful assistant."
     user_content = [
-        "你能帮我写一个Python脚本吗？",
-        "请给我一些关于机器学习的建议。",
-        "你认为未来的科技会是什么样子？",
-        "如何提高我的编程技能？",
-        "你能推荐一些好书吗？",
-        "请告诉我一些关于人工智能的有趣事实。",
-        "你能给我讲个笑话吗？",
-        "你喜欢什么类型的音乐？",
-        "你能帮我解决一个数学问题吗？",
-        "你能告诉我一些关于历史的事情吗？",
-        "你能给我一些旅行建议吗？",
+        {"message": "你能帮我写一个Python脚本吗？", "attachment_lists": []},
+        {"message": "请给我一些关于机器学习的建议。", "attachment_lists": []},
+        {"message": "你认为未来的科技会是什么样子？", "attachment_lists": []},
+        {"message": "如何提高我的编程技能？", "attachment_lists": []},
+        {"message": "你能推荐一些好书吗？", "attachment_lists": []},
+        {"message": "请告诉我一些关于人工智能的有趣事实。", "attachment_lists": []},
+        {"message": "你能给我讲个笑话吗？", "attachment_lists": []},
+        {"message": "你喜欢什么类型的音乐？", "attachment_lists": []},
+        {"message": "你能帮我解决一个数学问题吗？", "attachment_lists": []},
+        {"message": "你能告诉我一些关于历史的事情吗？", "attachment_lists": []},
+        {"message": "你能给我一些旅行建议吗？", "attachment_lists": []},
     ]
 
 
 class test_2(ChatContent):
     user_content = [
-        "你是什么？",
-        "你能做什么",
-        "今天的日期是？",
-        "@agent 今天的日期是？",
-        "你们的产品包括哪些",
-        "我对你们的产品有疑问",
-        "我想问关于AR600设备的相关内容",
-        "我刚刚咨询的设备型号是什么",
-        "配置GRE隧道，并在隧道上运行静态路由实现互通的示例",
-        "配置采用HWTACACS协议对Telnet用户进行命令行授权示例",
-        "我该如何升级系统文件",
-        "我想通过ACL规则限制访问外网",
-        "上面给出的信息适用于什么型号的设备？",
-        "我刚刚咨询的设备型号是什么"
-        "使用5G链接公网时报错了",
-        "部署语音网关时遇到问题",
+        {"message": "你是什么？", "attachment_lists": []},
+        {"message": "你能做什么", "attachment_lists": []},
+        {"message": "今天的日期是？", "attachment_lists": []},
+        {"message": "@agent 今天的日期是？", "attachment_lists": []},
+        {"message": "你们的产品包括哪些", "attachment_lists": []},
+        {"message": "我对你们的产品有疑问", "attachment_lists": []},
+        {"message": "我想问关于AR600设备的相关内容", "attachment_lists": []},
+        {"message": "我刚刚咨询的设备型号是什么", "attachment_lists": []},
+        {"message": "配置GRE隧道，并在隧道上运行静态路由实现互通的示例", "attachment_lists": []},
+        {"message": "配置采用HWTACACS协议对Telnet用户进行命令行授权示例", "attachment_lists": []},
+        {"message": "我该如何升级系统文件", "attachment_lists": []},
+        {"message": "我想通过ACL规则限制访问外网", "attachment_lists": []},
+        {"message": "上面给出的信息适用于什么型号的设备？", "attachment_lists": []},
+        {"message": "我刚刚咨询的设备型号是什么", "attachment_lists": []},
+        {"message": "使用5G链接公网时报错了", "attachment_lists": []},
+        {"message": "部署语音网关时遇到问题", "attachment_lists": []},
     ]
 
 
 class test_3(ChatContent):
     user_content = [
-        "@agent",
-        "你是什么？",
-        "你能做什么",
-        "今天的日期是？",
-        "你们的产品包括哪些",
-        "我对你们的产品有疑问",
-        "我想问关于AR600设备的相关内容",
-        "我刚刚咨询的设备型号是什么",
-        "配置GRE隧道，并在隧道上运行静态路由实现互通的示例",
-        "配置采用HWTACACS协议对Telnet用户进行命令行授权示例",
-        "我该如何升级系统文件",
-        "我想通过ACL规则限制访问外网",
-        "上面给出的信息适用于什么型号的设备？",
-        "我刚刚咨询的设备型号是什么"
-        "使用5G链接公网时报错了",
-        "部署语音网关时遇到问题",
-        "/exit"
+        {"message": "@agent", "attachment_lists": []},
+        {"message": "你是什么？", "attachment_lists": []},
+        {"message": "你能做什么", "attachment_lists": []},
+        {"message": "今天的日期是？", "attachment_lists": []},
+        {"message": "你们的产品包括哪些", "attachment_lists": []},
+        {"message": "我对你们的产品有疑问", "attachment_lists": []},
+        {"message": "我想问关于AR600设备的相关内容", "attachment_lists": []},
+        {"message": "我刚刚咨询的设备型号是什么", "attachment_lists": []},
+        {"message": "配置GRE隧道，并在隧道上运行静态路由实现互通的示例", "attachment_lists": []},
+        {"message": "配置采用HWTACACS协议对Telnet用户进行命令行授权示例", "attachment_lists": []},
+        {"message": "我该如何升级系统文件", "attachment_lists": []},
+        {"message": "我想通过ACL规则限制访问外网", "attachment_lists": []},
+        {"message": "上面给出的信息适用于什么型号的设备？", "attachment_lists": []},
+        {"message": "我刚刚咨询的设备型号是什么", "attachment_lists": []},
+        {"message": "使用5G链接公网时报错了", "attachment_lists": []},
+        {"message": "部署语音网关时遇到问题", "attachment_lists": []},
+        {"message": "/exit", "attachment_lists": []},
     ]
 
 
 class test_4_network_device_dev(ChatContent):
     user_content = [
-        "你是什么？",
-        "你能做什么",
-        "今天的日期是？",
-        "@agent 今天的日期是？",
-        "你的知识库里现在有哪些知识？",
-        "NDIS支持哪些类型的网络接口卡(NIC)驱动程序",
-        "NDIS微端口提供的电源管理（PM）服务包括哪些内容",
-        "什么是快速转发路径",
-        "数据传输时应该如何做中断处理？",
-        "如何在微端口驱动程序上实现LBFO",
-        "在主微端口失效后提升一个次微端口,应该怎么做？",
+        {"message": "你是什么？", "attachment_lists": []},
+        {"message": "你能做什么", "attachment_lists": []},
+        {"message": "今天的日期是？", "attachment_lists": []},
+        {"message": "@agent 今天的日期是？", "attachment_lists": []},
+        {"message": "你的知识库里现在有哪些知识？", "attachment_lists": []},
+        {"message": "NDIS支持哪些类型的网络接口卡(NIC)驱动程序", "attachment_lists": []},
+        {"message": "NDIS微端口提供的电源管理（PM）服务包括哪些内容", "attachment_lists": []},
+        {"message": "什么是快速转发路径", "attachment_lists": []},
+        {"message": "数据传输时应该如何做中断处理？", "attachment_lists": []},
+        {"message": "如何在微端口驱动程序上实现LBFO", "attachment_lists": []},
+        {"message": "在主微端口失效后提升一个次微端口,应该怎么做？", "attachment_lists": []},
     ]
 
 
 class test_5_ping(ChatContent):
     user_content = [
-        "你是谁，什么版本",
+        {"message": "你是谁，什么版本", "attachment_lists": []},
     ]
 
 
 class test_6_draw(ChatContent):
+    image_filename = "test6_output.png"
     user_content = [
-        "请画一幅画：一只戴着宇航员头盔的可爱橘猫在月球上散步，背景是璀璨的星空和蔚蓝的地球。",
+        {
+            "message": "请画一幅画：一只戴着宇航员头盔的可爱橘猫在月球上散步，背景是璀璨的星空和蔚蓝的地球。",
+            "attachment_lists": [],
+        },
+        {
+            "message": "这张图中有什么？",
+            "attachment_lists": ["logs/test6_output.png"],
+        },
     ]
 
 
 class test_99(ChatContent):
     user_content = [
-        "配置GRE隧道，并在隧道上运行静态路由实现互通的示例",
-        "配置采用HWTACACS协议对Telnet用户进行命令行授权示例",
-        "我该如何升级系统文件",
-        "我想通过ACL规则限制访问外网",
-        "上面给出的信息适用于什么型号的设备？",
-        "我刚刚咨询的设备型号是什么"
-        "使用5G链接公网时报错了",
-        "部署语音网关时遇到问题",
+        {"message": "配置GRE隧道，并在隧道上运行静态路由实现互通的示例", "attachment_lists": []},
+        {"message": "配置采用HWTACACS协议对Telnet用户进行命令行授权示例", "attachment_lists": []},
+        {"message": "我该如何升级系统文件", "attachment_lists": []},
+        {"message": "我想通过ACL规则限制访问外网", "attachment_lists": []},
+        {"message": "上面给出的信息适用于什么型号的设备？", "attachment_lists": []},
+        {"message": "我刚刚咨询的设备型号是什么", "attachment_lists": []},
+        {"message": "使用5G链接公网时报错了", "attachment_lists": []},
+        {"message": "部署语音网关时遇到问题", "attachment_lists": []},
     ]
 
 
@@ -571,5 +675,3 @@ def get_test_suite(name: str, *args, **kwargs) -> ChatContent:
 
     available = get_available_test_suites()
     raise ValueError(f"未找到测试套件 '{name}'。可用测试套件列表: {', '.join(available)}")
-
-

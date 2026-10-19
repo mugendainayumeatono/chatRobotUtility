@@ -8,6 +8,7 @@ import argparse
 import base64
 import hashlib
 import logging
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any, List, Optional
@@ -18,6 +19,14 @@ import test_suite
 from base_client import HTTPClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s %(filename)s:%(lineno)d - %(message)s')
+
+KNOWN_BINARY_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a",
+    ".mp4", ".mkv", ".avi", ".mov", ".webm",
+    ".bin", ".exe", ".dll", ".so", ".dylib", ".pyc", ".wasm",
+}
 
 
 def encode_local_image_to_data_uri(image_path: str) -> Optional[str]:
@@ -37,37 +46,86 @@ def encode_local_image_to_data_uri(image_path: str) -> Optional[str]:
     return f"data:{mime_type};base64,{b64_str}"
 
 
-def build_multimodal_content(text: str, image_sources: Optional[List[str]] = None) -> Any:
+def encode_attachment_part(file_path: str) -> Optional[dict]:
+    """
+    将本地附件文件编码为 OpenAI chat.completions 支持的 content 块：
+    - 图片文件 -> {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}
+    - 文本文件 -> {"type": "text", "text": "[附件文件: ...]\n..."}
+    - 其他二进制文件（如 PDF 等） -> {"type": "file", "file": {"filename": ..., "file_data": "data:...;base64,..."}}
+    """
+    path = Path(file_path).expanduser().resolve()
+    if not path.is_file():
+        logging.warning(f"本地附件文件不存在: {file_path}")
+        return None
+    if path.stat().st_size > test_suite.MAX_IMAGE_SIZE_BYTES:
+        logging.error(f"本地附件文件过大: {file_path}")
+        return None
+
+    file_bytes = path.read_bytes()
+    guessed_mime, _ = mimetypes.guess_type(str(path))
+
+    # 1. 检测是否为图片格式
+    if test_suite.detect_image_extension(file_bytes, guessed_mime) is not None:
+        mime_type = test_suite.detect_image_mime(file_bytes)
+        b64_str = base64.b64encode(file_bytes).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{b64_str}"},
+        }
+
+    # 2. 检测是否为可读文本文件
+    ext_lower = path.suffix.lower()
+    if ext_lower not in KNOWN_BINARY_EXTENSIONS and b"\x00" not in file_bytes[:8192]:
+        try:
+            text_content = file_bytes.decode("utf-8")
+            return {
+                "type": "text",
+                "text": f"[附件文件: {path.name}]\n{text_content}",
+            }
+        except UnicodeDecodeError:
+            pass
+
+    # 3. 其他二进制文件（如 PDF 等）使用 file 类型传递
+    mime_type = guessed_mime or "application/octet-stream"
+    b64_str = base64.b64encode(file_bytes).decode("ascii")
+    return {
+        "type": "file",
+        "file": {
+            "filename": path.name,
+            "file_data": f"data:{mime_type};base64,{b64_str}",
+        },
+    }
+
+
+def build_multimodal_content(text: str, attachment_lists: Optional[List[str]] = None) -> Any:
     """
     构建 OpenAI 兼容的多模态消息 content 列表
     参数：
-        text: 文本提示词
-        image_sources: 本地图片路径、HTTP(S) 链接或 data URI 列表
+        text: 文本提示词 (message)
+        attachment_lists: 本地附件文件路径列表
     """
-    if not image_sources:
+    if not attachment_lists:
         return text
 
     content_parts = []
     if text:
         content_parts.append({"type": "text", "text": text})
 
-    for src in image_sources:
+    for src in attachment_lists:
         if not src:
             continue
-        if src.startswith(("http://", "https://", "data:")):
-            url_val = src
-        else:
-            url_val = encode_local_image_to_data_uri(src)
-            if not url_val:
-                continue
-        content_parts.append({
-            "type": "image_url",
-            "image_url": {"url": url_val},
-        })
+        part = encode_attachment_part(src)
+        if part is not None:
+            content_parts.append(part)
+
+    if not content_parts:
+        return text
     return content_parts
 
 
 class openaiClient(HTTPClient):
+    support_attachments = True
+
     def __init__(self, model="default", temperature=0.7, url="", api_key=None, stream=False, log_dir=None):
         """
         初始化聊天客户端
@@ -129,6 +187,11 @@ class openaiClient(HTTPClient):
             return self._test_suite.log_dir
         return self.log_dir
 
+    def _get_target_image_filename(self) -> Optional[str]:
+        if self._test_suite is not None:
+            return getattr(self._test_suite, "image_filename", None)
+        return None
+
     def _save_unique_image(self, source: Any, seen_hashes: set, saved_paths: List[Path]) -> Optional[Path]:
         """
         提取图片字节并在当前轮次去重后保存至 logs 文件夹
@@ -145,6 +208,7 @@ class openaiClient(HTTPClient):
             image_bytes,
             mime_type=mime_type,
             log_dir=self._get_target_log_dir(),
+            filename=self._get_target_image_filename(),
         )
         if path is not None:
             seen_hashes.add(digest)
@@ -209,6 +273,7 @@ class openaiClient(HTTPClient):
             raw_reply,
             log_dir=self._get_target_log_dir(),
             seen_hashes=seen_hashes,
+            filename=self._get_target_image_filename(),
         )
         for p in text_image_paths:
             saved_paths.append(p)
@@ -226,12 +291,22 @@ class openaiClient(HTTPClient):
 
     def _prepare_messages(self, user_input: Any) -> List[dict]:
         """
-        准备发送给 OpenAI 接口的 messages 列表，支持直接调用 talk() 以及本地图片路径自动转码
+        准备发送给 OpenAI 接口的 messages 列表，将每轮的 message 与 attachment_lists 组装发送给大模型
         """
         if self._test_suite is not None and getattr(self._test_suite, "messages", None):
             raw_messages = self._test_suite.messages
         else:
-            raw_messages = [{"role": "user", "content": user_input}]
+            if isinstance(user_input, dict):
+                validated = test_suite.ChatContent().validate_user_input(user_input)
+                raw_messages = [
+                    {
+                        "role": "user",
+                        "content": validated["message"],
+                        "attachment_lists": validated["attachment_lists"],
+                    }
+                ]
+            else:
+                raw_messages = [{"role": "user", "content": str(user_input)}]
 
         prepared = []
         for msg in raw_messages:
@@ -239,29 +314,15 @@ class openaiClient(HTTPClient):
                 continue
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            attachment_lists = msg.get("attachment_lists", [])
             # 如果 system 消息为空字符串，跳过向后端发送空 system 消息以兼容各类多模态模型
             if role == "system" and content == "":
                 continue
-            if isinstance(content, list):
-                normalized_parts = []
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "image_url":
-                        img_url_obj = part.get("image_url", {})
-                        url = img_url_obj.get("url", "") if isinstance(img_url_obj, dict) else str(img_url_obj)
-                        if url and not url.startswith(("http://", "https://", "data:")):
-                            encoded = encode_local_image_to_data_uri(url)
-                            if encoded:
-                                part = {
-                                    "type": "image_url",
-                                    "image_url": {"url": encoded},
-                                }
-                    normalized_parts.append(part)
-                prepared.append({"role": role, "content": normalized_parts})
+            if attachment_lists:
+                multimodal_content = build_multimodal_content(str(content), attachment_lists)
+                prepared.append({"role": role, "content": multimodal_content})
             else:
                 prepared.append({"role": role, "content": content})
-
-        if not prepared and user_input is not None:
-            prepared.append({"role": "user", "content": user_input})
 
         return prepared
 
@@ -271,9 +332,9 @@ class openaiClient(HTTPClient):
 
     def talk(self, user_input):
         """
-        发送消息并获取回复（支持多模态输入及模型生成图片自动保存至 logs 文件夹）
+        发送消息并获取回复（支持上传 attachment_lists 中的本地文件及模型生成图片自动保存至 logs 文件夹）
         参数：
-            user_input: 用户输入的字符串或多模态内容列表
+            user_input: 用户输入字典（包含 message 和 attachment_lists）
         返回：
             模型的回复内容（若包含生成的图片，会自动保存至 logs 文件夹并在回复中附带保存路径）
         """
@@ -322,7 +383,7 @@ class openaiClient(HTTPClient):
 
 # 测试代码
 def main():
-    parser = argparse.ArgumentParser(description="OpenAI 聊天客户端测试工具（支持多模态对话与图片生成保存）")
+    parser = argparse.ArgumentParser(description="OpenAI 聊天客户端测试工具（支持多模态文件上传与图片生成保存）")
     parser.add_argument("--model", type=str, default="default", help="模型名称")
     parser.add_argument("--url", type=str, default="http://127.0.0.1:30000/v1", help="API基础 URL")
     parser.add_argument("--api_key", type=str, help="API 密钥 (如果未提供，将尝试从环境变量 OPENAI_API_KEY 获取)")
@@ -330,7 +391,7 @@ def main():
     parser.add_argument("--test-suite", "--test_suite", "--test", "-t", type=str, default="test_5_ping",
                         help=f"要执行的测试套件名称 (默认: test_5_ping，可选: {', '.join(test_suite.get_available_test_suites())})")
     parser.add_argument("--prompt", "-p", type=str, default=None, help="直接发送单条提示词（例如要求模型画一幅画），不指定则运行测试套件")
-    parser.add_argument("--image", "-i", type=str, nargs="*", default=None, help="附加的多模态输入图片路径或 URL（可指定多个）")
+    parser.add_argument("--image", "--attachment", "-i", "-a", type=str, nargs="*", default=None, help="附加的本地文件路径列表（可指定多个）")
     parser.add_argument("--list-test", "--list-tests", "--list_tests", "--list_test", dest="list_test", action="store_true", help="列出所有可用的测试套件并退出")
     parser.add_argument("--list-modes", "--list-mode", "--list-models", "--list-model", "--list_modes", "--list_mode", dest="list_modes", action="store_true", help="列出全部可用的模型列表并退出")
 
@@ -367,8 +428,12 @@ def main():
 
     if args.prompt is not None:
         suite = test_suite.ChatContent()
-        user_item = build_multimodal_content(args.prompt, args.image) if args.image else args.prompt
-        suite.user_content = [user_item]
+        suite.user_content = [
+            {
+                "message": args.prompt,
+                "attachment_lists": args.image if args.image else [],
+            }
+        ]
         client.run(suite)
         return
 
@@ -386,8 +451,8 @@ def test():
     chat_content = test_suite.test_1()
     chat_content.add_messages({"role": "system", "content": chat_content.system_content})
     for i in range(len(chat_content.user_content)):
-        user_input = chat_content.user_content[i]
-        chat_content.add_messages({"role": "user", "content": user_input})
+        user_item = chat_content.get_validated_user_input(i)
+        chat_content.add_messages({"role": "user", "content": user_item["message"]})
         reply = "dummy reply"  # 模拟模型的回复
         chat_content.add_messages({"role": "assistant", "content": reply})
     chat_content.save_chat_content()
@@ -396,4 +461,3 @@ def test():
 if __name__ == "__main__":
     main()
     #test()
-

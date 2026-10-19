@@ -94,7 +94,7 @@ python openAI_client.py [参数]
 | `--stream` | | 标志 | `False` | 启用流式（Stream）输出模式 |
 | `--test-suite` | `--test`, `-t` | `str` | `test_5_ping` | 指定执行的测试套件名称（如 `test_1`、`test_6_draw` 等） |
 | `--prompt` | `-p` | `str` | `None` | 直接发送单条提示词（例如要求模型画一幅画），不指定则运行测试套件 |
-| `--image` | `-i` | `list[str]` | `None` | 附加的多模态输入图片本地路径或 URL（可指定多个） |
+| `--image`, `--attachment` | `-i`, `-a` | `list[str]` | `None` | 附加的本地文件路径列表（可指定多个） |
 | `--list-test` | `--list-tests` | 标志 | `False` | 列出所有可用的测试套件并退出 |
 | `--list-modes` | `--list-mode`, `--list-models` | 标志 | `False` | 列出服务端全部可用的模型列表并退出 |
 
@@ -121,8 +121,12 @@ python openAI_client.py [参数]
 
 ### 4. 测试套件与日志保存 (`test_suite.py`)
 
-提供 `ChatContent` 基类、预设测试用例、图片提取与保存工具函数及动态加载函数：
+提供 `ChatContent` 基类、预设测试用例、附件路径校验、图片提取与保存工具函数及动态加载函数：
 
+- **`user_content` 数据格式**：
+  - `user_content` 为字典数组，每个字典包含 `message`（字符串提示词）与 `attachment_lists`（本地文件路径字符串数组）。
+  - 执行每轮对话时，由 `test_suite.py` 自动校验 `attachment_lists` 中的本地文件是否存在；若文件不存在，会在日志中记录 `WARNING` 警告并将剩余部分正常发送给大模型。
+  - `openAI_client.py` 支持将每轮对话中的 `message` 与 `attachment_lists` 附件一同发送给大模型；其余客户端仅使用纯文本 `message`。
 - **动态加载函数**：
   - `test_suite.get_available_test_suites()`: 返回当前所有已定义的测试套件名称列表。
   - `test_suite.get_test_suite(name)`: 根据名称字符串动态实例化对应测试套件，若不存在则抛出包含可用列表的友好提示。
@@ -132,12 +136,12 @@ python openAI_client.py [参数]
   - `test_3`: 带指令与退出的交互测试
   - `test_4_network_device_dev`: 驱动开发与网络设备专项技术问答测试
   - `test_5_ping`: 身份与可用性探测问答测试
-  - `test_6_draw`: 多模态文生图画图测试
+  - `test_6_draw`: 多模态文生图与识图两轮测试（第一轮生成图片并保存为 `logs/test6_output.png`，第二轮将该图片作为附件发送给大模型询问图中内容）
   - `test_99`: 路由配置与网络故障排障问答测试
 
 #### 日志与图片保存机制
 - **对话日志**：当测试运行完成（调用 `save_chat_content()`）后，对话历史自动保存至 `logs/chat_log_YYYYMMDD_HHMMSS.log`。
-- **生成图片保存**：当要求模型画一幅画时，客户端会自动提取模型返回的图片并保存至 `logs/image_YYYYMMDD_HHMMSS.<ext>`（若同一秒内有多张图片则自动追加序号 `_1`、`_2`），同时在对话日志中记录图片保存的完整路径。
+- **生成图片保存**：当要求模型画一幅画时，客户端会自动提取模型返回的图片并保存至 `logs/` 目录（如 `test_6_draw` 固定保存为 `logs/test6_output.png`，常规生成保存为 `logs/image_YYYYMMDD_HHMMSS.<ext>`），同时在对话日志中记录图片保存的完整路径。
 - 若 `logs/` 文件夹不存在，程序将自动创建。
 
 ---
@@ -276,9 +280,9 @@ from test_suite import ChatContent
 class MyCustomTest(ChatContent):
     system_content = "你是一名网络架构师，回答请力求精简且专业。"
     user_content = [
-        "请简述 BGP 协议在大型网络中的选路规则。",
-        "OSPF 与 IS-IS 的主要区别是什么？",
-        "如何排查 VLAN 间单播通信异常？"
+        {"message": "请简述 BGP 协议在大型网络中的选路规则。", "attachment_lists": []},
+        {"message": "OSPF 与 IS-IS 的主要区别是什么？", "attachment_lists": []},
+        {"message": "请分析这张网络拓扑图中的单点故障风险。", "attachment_lists": ["logs/topology.png"]},
     ]
 
 # 2. 初始化客户端并执行测试

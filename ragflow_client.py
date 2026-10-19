@@ -14,12 +14,15 @@ from openAI_client import openaiClient
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s %(filename)s:%(lineno)d - %(message)s')
 
 class ragflowClient(openaiClient):
+    support_attachments = False
+
     def __init__(self, model="default", temperature=0.7, url=""):
         super().__init__(model, temperature, url)
         self.api_key = "ragflow-cwZjJkMTRjMWY0NTExZjA5OGRiZmExZj"
         self.url = url
 
     def talk_init(self, test_suite):
+        super().talk_init(test_suite)
         url = self.url
         #base_url="http://<YOUR_BASE_URL>:9380"
         #rag_object = RAGFlow(api_key=self.api_key, base_url=url)

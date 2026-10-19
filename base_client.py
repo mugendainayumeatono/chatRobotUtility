@@ -4,6 +4,8 @@ from typing import Dict, Any
 import logging
 
 class HTTPClient:
+    support_attachments = False
+
     def __init__(self, host: str = 'localhost', port: int = 8000):
         self.host = host
         self.port = port
@@ -106,10 +108,17 @@ class HTTPClient:
         logging.info(f"开始测试: {_test_suite.__class__.__name__}")
         self.talk_init(_test_suite)
         for i in range(len(_test_suite.user_content)):
-            user_input = _test_suite.user_content[i]
-            user_content_val = user_input if isinstance(user_input, (list, dict)) else f"{user_input}"
-            _test_suite.add_messages({"role": "user", "content": user_content_val})
-            message = self.talk(user_input)
+            user_item = _test_suite.get_validated_user_input(i)
+            if self.support_attachments:
+                user_msg_record = {"role": "user", "content": user_item["message"]}
+                if user_item["attachment_lists"]:
+                    user_msg_record["attachment_lists"] = user_item["attachment_lists"]
+                _test_suite.add_messages(user_msg_record)
+                message = self.talk(user_item)
+            else:
+                text_message = user_item["message"]
+                _test_suite.add_messages({"role": "user", "content": text_message})
+                message = self.talk(text_message)
             _test_suite.add_messages({"role": "assistant", "content": f"{message}"})
         _test_suite.save_chat_content()
         if getattr(_test_suite, "saved_images", None):
