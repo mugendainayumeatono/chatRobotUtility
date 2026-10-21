@@ -126,7 +126,7 @@ def build_multimodal_content(text: str, attachment_lists: Optional[List[str]] = 
 class openaiClient(HTTPClient):
     support_attachments = True
 
-    def __init__(self, model="default", temperature=0.7, url="", api_key=None, stream=False, log_dir=None):
+    def __init__(self, model="default", temperature=0.7, url="", api_key=None, stream=False, log_dir=None, image_model="dall-e-3"):
         """
         初始化聊天客户端
         参数：
@@ -136,6 +136,7 @@ class openaiClient(HTTPClient):
             api_key: API 密钥
             stream: 是否启用流式输出
             log_dir: 日志与生成图片的保存目录（默认为 logs 文件夹）
+            image_model: 文生图模型名称（默认 dall-e-3）
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -147,6 +148,7 @@ class openaiClient(HTTPClient):
         )
 
         self.model = model
+        self.image_model = image_model
         self.temperature = temperature
         self.stream = stream
         self.log_dir = log_dir
@@ -380,14 +382,79 @@ class openaiClient(HTTPClient):
         except openai.OpenAIError as e:
             return f"发生错误: {e}"
 
+    def draw(self, user_input):
+        """
+        支持绘画的模型交互函数：
+        当输入为画图需求时，调用图片生成接口（如 client.images.generate）生成并保存图片；
+        若包含已有附件（如多模态对已生成图片的追问）或文生图接口调用失败时，回退至纯文本/多模态对话接口。
+        参数：
+            user_input: 用户输入字典（包含 message 和 attachment_lists）或字符串
+        返回：
+            模型回复或图片保存路径说明
+        """
+        if isinstance(user_input, dict):
+            prompt = str(user_input.get("message", ""))
+            attachments = user_input.get("attachment_lists", [])
+        else:
+            prompt = str(user_input)
+            attachments = []
+
+        # 如果包含附件列表，说明是对已有图片/文件的多模态追问，使用纯文字/多模态对话函数
+        if attachments:
+            return self.talk(user_input)
+
+        try:
+            image_model = self.image_model or "dall-e-3"
+            response = self.client.images.generate(
+                model=image_model,
+                prompt=prompt,
+                n=1,
+            )
+
+            seen_hashes: set = set()
+            saved_paths: List[Path] = []
+            revised_prompt = ""
+
+            if hasattr(response, "data") and isinstance(response.data, list):
+                for item in response.data:
+                    self._save_unique_image(item, seen_hashes, saved_paths)
+                    if hasattr(item, "revised_prompt") and item.revised_prompt:
+                        revised_prompt = item.revised_prompt
+                    elif isinstance(item, dict) and item.get("revised_prompt"):
+                        revised_prompt = item["revised_prompt"]
+
+            if saved_paths:
+                notes = [f"[图片已保存至: {p}]" for p in saved_paths]
+                result_text = "\n".join(notes)
+                if revised_prompt:
+                    result_text = f"图片已生成: {revised_prompt}\n{result_text}"
+                return result_text
+            else:
+                return "已调用绘图接口，但未接收到有效图片数据。"
+
+        except openai.OpenAIError as e:
+            logging.warning(f"调用 images.generate 绘图接口失败 ({e})，尝试回退到 chat.completions 对话接口")
+            return self.talk(user_input)
+        except Exception as e:
+            logging.error(f"绘图处理发生异常: {e}")
+            return f"绘图发生错误: {e}"
+
+    def talk_draw(self, user_input):
+        """
+        支持绘画函数的别名
+        """
+        return self.draw(user_input)
+
 
 # 测试代码
 def main():
     parser = argparse.ArgumentParser(description="OpenAI 聊天客户端测试工具（支持多模态文件上传与图片生成保存）")
     parser.add_argument("--model", type=str, default="default", help="模型名称")
+    parser.add_argument("--image-model", "--image_model", type=str, default="dall-e-3", help="图片生成模型名称 (默认: dall-e-3)")
     parser.add_argument("--url", type=str, default="http://127.0.0.1:30000/v1", help="API基础 URL")
     parser.add_argument("--api_key", type=str, help="API 密钥 (如果未提供，将尝试从环境变量 OPENAI_API_KEY 获取)")
     parser.add_argument("--stream", action="store_true", help="是否启用流式响应")
+    parser.add_argument("--draw", action="store_true", help="启用绘画模式 (单条提示词测试时使用)")
     parser.add_argument("--test-suite", "--test_suite", "--test", "-t", type=str, default="test_5_ping",
                         help=f"要执行的测试套件名称 (默认: test_5_ping，可选: {', '.join(test_suite.get_available_test_suites())})")
     parser.add_argument("--prompt", "-p", type=str, default=None, help="直接发送单条提示词（例如要求模型画一幅画），不指定则运行测试套件")
@@ -408,7 +475,8 @@ def main():
             model=args.model,
             url=args.url,
             api_key=args.api_key,
-            stream=args.stream
+            stream=args.stream,
+            image_model=args.image_model,
         )
         models = client.list_models()
         if models:
@@ -423,11 +491,13 @@ def main():
         model=args.model,
         url=args.url,
         api_key=args.api_key,
-        stream=args.stream
+        stream=args.stream,
+        image_model=args.image_model,
     )
 
     if args.prompt is not None:
         suite = test_suite.ChatContent()
+        suite.allow_draw = bool(args.draw)
         suite.user_content = [
             {
                 "message": args.prompt,

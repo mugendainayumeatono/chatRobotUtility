@@ -90,6 +90,19 @@ class HTTPClient:
         message = self.data_analyze(data)
         return message
 
+    def draw(self, message: Any) -> Any:
+        """
+        支持绘画的模型交互函数。基类默认回退到 talk 文本交互。
+        支持绘画的客户端（如 openaiClient）可重写此方法调用文生图 API。
+        """
+        return self.talk(message)
+
+    def talk_draw(self, message: Any) -> Any:
+        """
+        支持绘画函数的别名
+        """
+        return self.draw(message)
+
     def talk_init(self,test_suite):
         pass
     
@@ -107,18 +120,22 @@ class HTTPClient:
 
         logging.info(f"开始测试: {_test_suite.__class__.__name__}")
         self.talk_init(_test_suite)
+        allow_draw = getattr(_test_suite, "allow_draw", False)
         for i in range(len(_test_suite.user_content)):
             user_item = _test_suite.get_validated_user_input(i)
+            # 根据测试套件是否允许画图，选择绘画函数或纯文本函数
+            chat_fn = self.draw if allow_draw else self.talk
+
             if self.support_attachments:
                 user_msg_record = {"role": "user", "content": user_item["message"]}
                 if user_item["attachment_lists"]:
                     user_msg_record["attachment_lists"] = user_item["attachment_lists"]
                 _test_suite.add_messages(user_msg_record)
-                message = self.talk(user_item)
+                message = chat_fn(user_item)
             else:
                 text_message = user_item["message"]
                 _test_suite.add_messages({"role": "user", "content": text_message})
-                message = self.talk(text_message)
+                message = chat_fn(text_message)
             _test_suite.add_messages({"role": "assistant", "content": f"{message}"})
         _test_suite.save_chat_content()
         if getattr(_test_suite, "saved_images", None):

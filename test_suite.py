@@ -415,6 +415,7 @@ def resolve_and_validate_attachments(attachment_lists: Optional[List[str]]) -> L
 class ChatContent:
     system_content = ""
     user_content = []
+    allow_draw: bool = False
     image_filename: Optional[str] = None
 
     def __init__(self, log_dir=None):
@@ -539,6 +540,7 @@ class ChatContent:
 
 class test_1(ChatContent):
     system_content = "你是一个helpful assistant."
+    allow_draw = False
     user_content = [
         {"message": "你能帮我写一个Python脚本吗？", "attachment_lists": []},
         {"message": "请给我一些关于机器学习的建议。", "attachment_lists": []},
@@ -555,6 +557,7 @@ class test_1(ChatContent):
 
 
 class test_2(ChatContent):
+    allow_draw = False
     user_content = [
         {"message": "你是什么？", "attachment_lists": []},
         {"message": "你能做什么", "attachment_lists": []},
@@ -576,6 +579,7 @@ class test_2(ChatContent):
 
 
 class test_3(ChatContent):
+    allow_draw = False
     user_content = [
         {"message": "@agent", "attachment_lists": []},
         {"message": "你是什么？", "attachment_lists": []},
@@ -598,6 +602,7 @@ class test_3(ChatContent):
 
 
 class test_4_network_device_dev(ChatContent):
+    allow_draw = False
     user_content = [
         {"message": "你是什么？", "attachment_lists": []},
         {"message": "你能做什么", "attachment_lists": []},
@@ -614,12 +619,14 @@ class test_4_network_device_dev(ChatContent):
 
 
 class test_5_ping(ChatContent):
+    allow_draw = False
     user_content = [
         {"message": "你是谁，什么版本", "attachment_lists": []},
     ]
 
 
 class test_6_draw(ChatContent):
+    allow_draw = True
     image_filename = "test6_output.png"
     user_content = [
         {
@@ -634,6 +641,7 @@ class test_6_draw(ChatContent):
 
 
 class test_99(ChatContent):
+    allow_draw = False
     user_content = [
         {"message": "配置GRE隧道，并在隧道上运行静态路由实现互通的示例", "attachment_lists": []},
         {"message": "配置采用HWTACACS协议对Telnet用户进行命令行授权示例", "attachment_lists": []},
