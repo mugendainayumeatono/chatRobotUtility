@@ -154,7 +154,7 @@ DRAW_TOOLS = [
 class openaiClient(HTTPClient):
     support_attachments = True
 
-    def __init__(self, model="default", temperature=0.7, url="", api_key=None, stream=False, log_dir=None, image_model="dall-e-3"):
+    def __init__(self, model="default", temperature=0.7, url="", api_key=None, stream=False, log_dir=None, image_model="gemini-3.1-flash-image"):
         """
         初始化聊天客户端
         参数：
@@ -164,7 +164,7 @@ class openaiClient(HTTPClient):
             api_key: API 密钥
             stream: 是否启用流式输出
             log_dir: 日志与生成图片的保存目录（默认为 logs 文件夹）
-            image_model: 文生图模型名称（默认 dall-e-3）
+            image_model: 文生图模型名称（默认 gemini-3.1-flash-image）
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -422,7 +422,7 @@ class openaiClient(HTTPClient):
         revised_prompt = ""
 
         try:
-            image_model = self.image_model or "dall-e-3"
+            image_model = self.image_model or "gemini-3.1-flash-image"
             gen_kwargs = {
                 "model": image_model,
                 "prompt": prompt,
@@ -585,7 +585,7 @@ class openaiClient(HTTPClient):
 def main():
     parser = argparse.ArgumentParser(description="OpenAI 聊天客户端测试工具（支持多模态文件上传与图片生成保存）")
     parser.add_argument("--model", type=str, default="default", help="模型名称")
-    parser.add_argument("--image-model", "--image_model", type=str, default="dall-e-3", help="图片生成模型名称 (默认: dall-e-3)")
+    parser.add_argument("--image-model", "--image_model", type=str, default="gemini-3.1-flash-image", help="图片生成模型名称 (默认: gemini-3.1-flash-image)")
     parser.add_argument("--url", type=str, default="http://127.0.0.1:30000/v1", help="API基础 URL")
     parser.add_argument("--api_key", type=str, help="API 密钥 (如果未提供，将尝试从环境变量 OPENAI_API_KEY 获取)")
     parser.add_argument("--stream", action="store_true", help="是否启用流式响应")
