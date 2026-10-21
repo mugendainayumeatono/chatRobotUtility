@@ -8,10 +8,11 @@ import argparse
 import base64
 import hashlib
 import logging
+import json
 import mimetypes
 import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import openai
 
@@ -121,6 +122,33 @@ def build_multimodal_content(text: str, attachment_lists: Optional[List[str]] = 
     if not content_parts:
         return text
     return content_parts
+
+
+# Agent 工具调用定义的画图工具 (供 /v1/chat/completions 中的模型识别并触发)
+DRAW_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "生成或绘制一张满足用户要求的图片。当用户希望画画、绘图、生成图像时调用此工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "用于生成图像的详细中文或英文提示词（描述图像主体、场景、构图与细节风格）",
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": "图片尺寸，如 '1024x1024'",
+                        "default": "1024x1024",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    }
+]
 
 
 class openaiClient(HTTPClient):
@@ -382,39 +410,28 @@ class openaiClient(HTTPClient):
         except openai.OpenAIError as e:
             return f"发生错误: {e}"
 
-    def draw(self, user_input):
+    def _execute_image_generation_tool(self, prompt: str, size: Optional[str] = None) -> Tuple[str, List[Path]]:
         """
-        支持绘画的模型交互函数：
-        当输入为画图需求时，调用图片生成接口（如 client.images.generate）生成并保存图片；
-        若包含已有附件（如多模态对已生成图片的追问）或文生图接口调用失败时，回退至纯文本/多模态对话接口。
-        参数：
-            user_input: 用户输入字典（包含 message 和 attachment_lists）或字符串
+        Agent 绘画工具执行器：
+        通过图片生成 API 渲染图像，并保存到本地 logs 目录。
         返回：
-            模型回复或图片保存路径说明
+            (结果描述文本, 保存的图片路径列表)
         """
-        if isinstance(user_input, dict):
-            prompt = str(user_input.get("message", ""))
-            attachments = user_input.get("attachment_lists", [])
-        else:
-            prompt = str(user_input)
-            attachments = []
-
-        # 如果包含附件列表，说明是对已有图片/文件的多模态追问，使用纯文字/多模态对话函数
-        if attachments:
-            return self.talk(user_input)
+        seen_hashes: set = set()
+        saved_paths: List[Path] = []
+        revised_prompt = ""
 
         try:
             image_model = self.image_model or "dall-e-3"
-            response = self.client.images.generate(
-                model=image_model,
-                prompt=prompt,
-                n=1,
-            )
+            gen_kwargs = {
+                "model": image_model,
+                "prompt": prompt,
+                "n": 1,
+            }
+            if size:
+                gen_kwargs["size"] = size
 
-            seen_hashes: set = set()
-            saved_paths: List[Path] = []
-            revised_prompt = ""
-
+            response = self.client.images.generate(**gen_kwargs)
             if hasattr(response, "data") and isinstance(response.data, list):
                 for item in response.data:
                     self._save_unique_image(item, seen_hashes, saved_paths)
@@ -425,19 +442,137 @@ class openaiClient(HTTPClient):
 
             if saved_paths:
                 notes = [f"[图片已保存至: {p}]" for p in saved_paths]
-                result_text = "\n".join(notes)
+                result_desc = "\n".join(notes)
                 if revised_prompt:
-                    result_text = f"图片已生成: {revised_prompt}\n{result_text}"
-                return result_text
-            else:
-                return "已调用绘图接口，但未接收到有效图片数据。"
+                    result_desc = f"图片已生成: {revised_prompt}\n{result_desc}"
+                return result_desc, saved_paths
+            return "未获取到图片数据", []
+        except Exception as e:
+            logging.error(f"执行图像生成工具失败: {e}")
+            return f"执行生成图像工具时出错: {e}", []
+
+    def draw(self, user_input):
+        """
+        通过 /v1/chat/completions 接口的 Agent 工具调用（Tool / Function Calling）方案支持绘画：
+        1. 携带 DRAW_TOOLS 提示词工具向 /v1/chat/completions 发起请求；
+        2. 模型作为 Agent 识别画图意图并返回 tool_calls；
+        3. 客户端执行绘画工具（文生图并保存本地）；
+        4. 将工具执行结果作为 tool 角色消息追加进 messages，再次请求 /v1/chat/completions 获取模型整合后的最终回复；
+        5. 若模型没有触发工具调用或遇到附件识图时，按常规文本/多模态对话流程处理。
+        参数：
+            user_input: 用户输入字典（包含 message 和 attachment_lists）或字符串
+        返回：
+            模型的最终回复内容（包含图片保存说明）
+        """
+        if isinstance(user_input, dict):
+            attachments = user_input.get("attachment_lists", [])
+        else:
+            attachments = []
+
+        # 若包含已有附件（如第 2 轮对已保存图片的追问），直接走多模态文本对话
+        if attachments:
+            return self.talk(user_input)
+
+        try:
+            messages = self._prepare_messages(user_input)
+
+            # 第一步：携带工具定义请求 /v1/chat/completions
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                tools=DRAW_TOOLS,
+                tool_choice="auto",
+                stream=False,  # 工具调用协商采用非流式以确保结构完整
+            )
+
+            if not response.choices or len(response.choices) == 0:
+                return "未收到模型回复"
+
+            first_choice = response.choices[0]
+            message_obj = first_choice.message
+            tool_calls = getattr(message_obj, "tool_calls", None)
+
+            # 模型触发了 Agent 工具调用
+            if tool_calls and len(tool_calls) > 0:
+                logging.info(f"模型触发了 Agent 工具调用: {[tc.function.name for tc in tool_calls]}")
+
+                # 将模型的 assistant tool_calls 消息追加到对话上下文中
+                assistant_tool_msg = {
+                    "role": "assistant",
+                    "content": message_obj.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                }
+                messages.append(assistant_tool_msg)
+
+                saved_paths_all: List[Path] = []
+                for tc in tool_calls:
+                    fn_name = tc.function.name
+                    raw_args = tc.function.arguments or "{}"
+                    try:
+                        args = json.loads(raw_args)
+                    except Exception:
+                        args = {"prompt": raw_args}
+
+                    if fn_name in ("generate_image", "draw", "dalle"):
+                        tool_prompt = args.get("prompt", str(user_input))
+                        tool_size = args.get("size", "1024x1024")
+                        tool_result, tool_paths = self._execute_image_generation_tool(tool_prompt, tool_size)
+                        saved_paths_all.extend(tool_paths)
+                    else:
+                        tool_result = f"未知工具: {fn_name}"
+
+                    # 按照 OpenAI Tool Calling 规范将执行结果作为 role: 'tool' 追加
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": fn_name,
+                        "content": tool_result,
+                    })
+
+                # 第二步：将包含工具输出的 messages 发回 /v1/chat/completions 获取模型最终回复
+                final_response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                )
+
+                reply_parts: List[str] = []
+                seen_hashes: set = set()
+                saved_paths: List[Path] = list(saved_paths_all)
+
+                if final_response.choices and len(final_response.choices) > 0:
+                    final_msg = final_response.choices[0].message
+                    self._extract_from_message_or_delta(final_msg, reply_parts, seen_hashes, saved_paths)
+                elif hasattr(final_response, "data") and isinstance(final_response.data, list):
+                    for item in final_response.data:
+                        self._save_unique_image(item, seen_hashes, saved_paths)
+
+                return self._finalize_reply_with_images("".join(reply_parts), seen_hashes, saved_paths)
+
+            # 模型未触发工具调用（如直接给出了纯文字回复或本身不支持工具），走原有的响应解析
+            reply_parts = []
+            seen_hashes = set()
+            saved_paths = []
+            self._extract_from_message_or_delta(message_obj, reply_parts, seen_hashes, saved_paths)
+            return self._finalize_reply_with_images("".join(reply_parts), seen_hashes, saved_paths)
 
         except openai.OpenAIError as e:
-            logging.warning(f"调用 images.generate 绘图接口失败 ({e})，尝试回退到 chat.completions 对话接口")
+            logging.warning(f"Agent 工具调用绘图失败 ({e})，回退到普通 talk() 接口")
             return self.talk(user_input)
         except Exception as e:
-            logging.error(f"绘图处理发生异常: {e}")
-            return f"绘图发生错误: {e}"
+            logging.error(f"draw 处理异常: {e}")
+            return f"绘图处理发生错误: {e}"
 
     def talk_draw(self, user_input):
         """
